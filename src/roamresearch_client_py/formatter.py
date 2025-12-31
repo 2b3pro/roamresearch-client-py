@@ -304,3 +304,249 @@ def format_block(i, nodes, indent=0):
         for j in sorted_nodes:
             lines.append(format_block(j, nodes, indent+2))
     return "\n".join(lines)
+
+
+def _build_ref_map(blocks: list, ref_map: dict | None = None) -> dict:
+    """Build a map of uid -> block for reference resolution."""
+    if ref_map is None:
+        ref_map = {}
+    for block in blocks:
+        uid = block.get(':block/uid')
+        if uid:
+            ref_map[uid] = block
+        # Include refs that came with the block
+        for ref in block.get(':block/refs', []):
+            ref_uid = ref.get(':block/uid')
+            if ref_uid and ref_uid not in ref_map:
+                ref_map[ref_uid] = ref
+        # Recurse into children
+        children = block.get(':block/children', [])
+        if children:
+            _build_ref_map(children, ref_map)
+    return ref_map
+
+
+def _resolve_all_refs(text: str, ref_map: dict, depth: int = 1) -> str:
+    """
+    Replace ((uid)) references with their text content.
+
+    Args:
+        text: Text containing ((uid)) references
+        ref_map: Map of uid -> block for resolution
+        depth: How many levels deep to resolve (1 = direct refs only)
+
+    Returns:
+        Text with refs resolved up to specified depth
+    """
+    if depth <= 0:
+        return text
+
+    for _ in range(depth):
+        refs = extract_ref(text)
+        if not refs:
+            break
+        resolved_any = False
+        for ref_uid in refs:
+            if ref_uid in ref_map:
+                ref_block = ref_map[ref_uid]
+                ref_text = ref_block.get(':block/string', '')
+                text = text.replace(f"(({ref_uid}))", ref_text)
+                resolved_any = True
+        if not resolved_any:
+            break  # No more refs to resolve in current map
+    return text
+
+
+def get_unresolved_refs(text: str, ref_map: dict) -> set:
+    """Get UIDs of references not in the ref_map."""
+    refs = extract_ref(text)
+    return {uid for uid in refs if uid not in ref_map}
+
+
+def collect_all_text_refs(blocks: list, ref_map: dict | None = None) -> set:
+    """
+    Collect all ((uid)) references from block text that aren't in ref_map.
+
+    Args:
+        blocks: List of blocks to scan
+        ref_map: Existing reference map (refs here are excluded)
+
+    Returns:
+        Set of UIDs that need to be fetched
+    """
+    if ref_map is None:
+        ref_map = {}
+
+    unresolved = set()
+
+    def scan_block(block):
+        text = block.get(':block/string', '')
+        for uid in extract_ref(text):
+            if uid not in ref_map:
+                unresolved.add(uid)
+        for child in block.get(':block/children', []):
+            scan_block(child)
+
+    for block in blocks:
+        scan_block(block)
+
+    return unresolved
+
+
+def _format_hierarchical_block(
+    block: dict,
+    ref_map: dict,
+    indent_depth: int = 0,
+    is_top_level: bool = False,
+    resolve_depth: int = 1
+) -> list[str]:
+    """
+    Format a single block and its children hierarchically.
+
+    Args:
+        block: Block dict with :block/string, :block/children, etc.
+        ref_map: Map of uid -> block for reference resolution
+        indent_depth: Current indentation depth (0 = top level)
+        is_top_level: If True, don't add bullet prefix at depth 0
+        resolve_depth: How many levels deep to resolve refs
+
+    Returns:
+        List of formatted lines
+    """
+    lines = []
+    text = block.get(':block/string', '')
+
+    # Skip empty blocks
+    if not text.strip():
+        # Still process children even if this block is empty
+        children = _get_sorted_children(block)
+        for child in children:
+            lines.extend(_format_hierarchical_block(child, ref_map, indent_depth, is_top_level=False, resolve_depth=resolve_depth))
+        return lines
+
+    # Resolve references
+    text = _resolve_all_refs(text, ref_map, depth=resolve_depth)
+
+    # Handle special block types
+    if _is_table_block(block):
+        table_md = _format_table(block, list(ref_map.values()))
+        if table_md:
+            indent = '  ' * indent_depth
+            for line in table_md.split('\n'):
+                lines.append(f"{indent}{line}")
+            lines.append('')
+        return lines
+
+    # Handle headings
+    heading = block.get(':block/heading')
+    if heading:
+        prefix = '#' * heading
+        text = f"{prefix} {text}"
+
+    # Format the block line
+    indent = '  ' * indent_depth
+    if indent_depth == 0 and is_top_level:
+        # Top-level blocks: no bullet, just text
+        lines.append(text)
+    else:
+        # Nested blocks: bullet with indentation
+        lines.append(f"{indent}- {text}")
+
+    # Process children recursively
+    children = _get_sorted_children(block)
+    for child in children:
+        lines.extend(_format_hierarchical_block(child, ref_map, indent_depth + 1, is_top_level=False, resolve_depth=resolve_depth))
+
+    return lines
+
+
+def format_blocks_hierarchical(
+    blocks: list,
+    resolve_depth: int = 1,
+    top_level_as_paragraphs: bool = True,
+    ref_map: dict | None = None
+) -> str:
+    """
+    Format Roam blocks as hierarchical markdown preserving parent-child structure.
+
+    This formatter maintains the tree structure of Roam blocks, outputting nested
+    bullet lists that mirror the block hierarchy in Roam Research.
+
+    Args:
+        blocks: List of top-level blocks (each may have :block/children)
+        resolve_depth: How many levels deep to resolve refs (0 = disable, 1+ = levels)
+        top_level_as_paragraphs: If True, top-level blocks are paragraphs;
+                                 if False, all blocks use bullet syntax
+        ref_map: Optional pre-built reference map (for external refs)
+
+    Returns:
+        Hierarchical markdown string
+
+    Example output:
+        Top level block
+
+        - Child 1
+          - Grandchild 1
+          - Grandchild 2
+        - Child 2
+    """
+    if not blocks:
+        return ''
+
+    # Build reference map for resolution
+    if ref_map is None:
+        ref_map = _build_ref_map(blocks) if resolve_depth > 0 else {}
+    elif resolve_depth > 0:
+        # Merge with refs from blocks
+        _build_ref_map(blocks, ref_map)
+
+    lines = []
+
+    for block in blocks:
+        text = block.get(':block/string', '')
+
+        # Handle special cases at top level
+        if _is_table_block(block):
+            table_md = _format_table(block, list(ref_map.values()))
+            if table_md:
+                lines.append(table_md)
+                lines.append('')
+            continue
+
+        if text.strip():
+            # Resolve refs in top-level text
+            if resolve_depth > 0:
+                text = _resolve_all_refs(text, ref_map, depth=resolve_depth)
+
+            # Handle heading
+            heading = block.get(':block/heading')
+            if heading:
+                prefix = '#' * heading
+                text = f"{prefix} {text}"
+
+            if top_level_as_paragraphs:
+                lines.append(text)
+                lines.append('')
+            else:
+                lines.append(f"- {text}")
+
+        # Process children
+        children = _get_sorted_children(block)
+        if children:
+            for child in children:
+                child_lines = _format_hierarchical_block(
+                    child,
+                    ref_map,
+                    indent_depth=0,
+                    is_top_level=False,
+                    resolve_depth=resolve_depth
+                )
+                lines.extend(child_lines)
+            lines.append('')  # Blank line after children group
+
+    # Clean up multiple blank lines
+    result = '\n'.join(lines)
+    while '\n\n\n' in result:
+        result = result.replace('\n\n\n', '\n\n')
+
+    return result.strip()

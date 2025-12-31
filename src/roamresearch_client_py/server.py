@@ -21,7 +21,7 @@ import pendulum
 
 from .client import RoamClient, create_page, create_block
 from .config import get_env_or_config, get_config_dir
-from .formatter import format_block, format_block_as_markdown, extract_ref, expand_refs_in_text
+from .formatter import format_block, format_block_as_markdown, format_blocks_hierarchical, extract_ref, expand_refs_in_text
 from .gfm_to_roam import gfm_to_batch_actions, gfm_to_blocks
 from .diff import parse_existing_blocks, diff_block_trees, generate_batch_actions
 
@@ -635,11 +635,11 @@ async def handle_get(identifier: str | List[str], raw: bool = False, expand_refs
         if children:
             children = sorted(children, key=lambda x: x.get(':block/order', 0))
 
-        # Format content
+        # Format content (hierarchical by default, resolves refs)
         if is_page:
-            content = format_block_as_markdown(children)
+            content = format_blocks_hierarchical(children)
         else:
-            content = format_block_as_markdown([result])
+            content = format_blocks_hierarchical([result])
 
         # Expand refs if enabled
         if expand_refs:

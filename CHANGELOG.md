@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.5 - 2025-12-30
+
+- feat(formatter): hierarchical markdown output preserving Roam's block structure
+- feat(formatter): reference resolution with `--level` flag (default 1, 0 to disable)
+- feat(cli): add `--level` / `-l` to control ref resolution depth (fetches external refs when > 1)
+- feat(cli): add `--flat` flag for backwards-compatible flattened output
+- feat(mcp): server now uses hierarchical formatting by default
+
 ## 0.3.4 - 2025-12-29
 
 - fix(mcp): handle empty identifier list in handle_get

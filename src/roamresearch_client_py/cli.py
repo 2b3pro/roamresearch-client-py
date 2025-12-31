@@ -10,7 +10,7 @@ from .config import init_config_file, CONFIG_FILE, configure_logging
 from .server import serve
 from .client import RoamClient, create_page
 from .gfm_to_roam import gfm_to_batch_actions
-from .formatter import format_block_as_markdown
+from .formatter import format_block_as_markdown, format_blocks_hierarchical, _build_ref_map, collect_all_text_refs, extract_ref
 
 
 def _run_async(coro):
@@ -100,6 +100,18 @@ def build_parser():
         "--debug",
         action="store_true",
         help="Output raw JSON data instead of markdown.",
+    )
+    get_cmd.add_argument(
+        "--flat",
+        action="store_true",
+        help="Output flattened markdown instead of hierarchical.",
+    )
+    get_cmd.add_argument(
+        "--level",
+        "-l",
+        type=int,
+        default=1,
+        help="Depth of reference resolution (default: 1). Use 0 to disable, higher for nested refs.",
     )
 
     # search command
@@ -233,7 +245,7 @@ def main(argv: Sequence[str] | None = None):
         return
 
     if args.command == "get":
-        _run_async(_get(args.identifier, args.debug))
+        _run_async(_get(args.identifier, args.debug, args.flat, args.level))
         return
 
     if args.command == "search":
@@ -319,7 +331,7 @@ def _parse_uid(identifier: str) -> str | None:
     return None
 
 
-async def _get(identifier: str, debug: bool = False):
+async def _get(identifier: str, debug: bool = False, flat: bool = False, level: int = 1):
     """Read a page or block and output as markdown."""
     uid = _parse_uid(identifier)
 
@@ -336,25 +348,59 @@ async def _get(identifier: str, debug: bool = False):
             result = await client.get_page_by_title(identifier)
             is_page = True
 
-    if not result:
-        print(f"Error: '{identifier}' not found.", file=sys.stderr)
-        return
+        if not result:
+            print(f"Error: '{identifier}' not found.", file=sys.stderr)
+            return
 
-    if debug:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return
+        if debug:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
 
-    # Get children
-    children = result.get(':block/children', [])
-    if children:
-        children = sorted(children, key=lambda x: x.get(':block/order', 0))
+        # Get children
+        children = result.get(':block/children', [])
+        if children:
+            children = sorted(children, key=lambda x: x.get(':block/order', 0))
 
-    if is_page:
-        # For pages, format children directly
-        output = format_block_as_markdown(children)
-    else:
-        # For blocks, include the block itself
-        output = format_block_as_markdown([result])
+        # Choose formatter based on --flat flag
+        if flat:
+            if is_page:
+                output = format_block_as_markdown(children)
+            else:
+                output = format_block_as_markdown([result])
+        else:
+            # Build ref_map and fetch external refs if level > 1
+            blocks_to_format = children if is_page else [result]
+            ref_map = _build_ref_map(blocks_to_format) if level > 0 else {}
+
+            # Fetch external refs for deeper resolution
+            if level > 1:
+                for _ in range(level - 1):
+                    # Find refs not in our map
+                    unresolved = collect_all_text_refs(blocks_to_format, ref_map)
+                    # Also check refs in already-resolved blocks
+                    for block in list(ref_map.values()):
+                        text = block.get(':block/string', '')
+                        for ref_uid in extract_ref(text):
+                            if ref_uid not in ref_map:
+                                unresolved.add(ref_uid)
+
+                    if not unresolved:
+                        break
+
+                    # Fetch each unresolved ref
+                    for ref_uid in unresolved:
+                        ref_block = await client.get_block_by_uid(ref_uid)
+                        if ref_block:
+                            ref_map[ref_uid] = ref_block
+                            # Also add any refs that came with this block
+                            _build_ref_map([ref_block], ref_map)
+
+            # Hierarchical output (default)
+            output = format_blocks_hierarchical(
+                blocks_to_format,
+                resolve_depth=level,
+                ref_map=ref_map
+            )
 
     print(output)
 
