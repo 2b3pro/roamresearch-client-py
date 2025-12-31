@@ -51,7 +51,11 @@ Env vars take precedence.
 rr get "Page Title"
 rr get "((block-uid))"
 rr get "Page Title" --debug
+rr get "Page Title" --level 3    # resolve nested refs (default: 1)
+rr get "Page Title" --flat       # flattened output (no hierarchy)
 ```
+
+Output preserves Roam's block hierarchy with nested bullets. The `--level` flag controls reference resolution depth (0 = none, 1 = direct refs, 2+ = fetch nested refs).
 
 ### Search
 
